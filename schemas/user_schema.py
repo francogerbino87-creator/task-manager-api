@@ -1,35 +1,49 @@
-from pydantic import BaseModel, Field, EmailStr
-from typing import Optional
+from typing import Optional, List
+from pydantic import BaseModel, EmailStr, Field, ConfigDict
 from datetime import datetime
 
-# --- Esquemas de Usuario ---
+# Base schema for shared attributes
+class UserBase(BaseModel):
+    email: EmailStr = Field(..., description="Correo electrónico único del usuario.")
+    full_name: Optional[str] = None
+    
+# Schema for user registration (includes the plain password)
+class UserCreate(UserBase):
+    password: str = Field(..., description="Contraseña del usuario (texto plano).")
 
-class UserCreate(BaseModel):
-    """Esquema usado para el registro de un nuevo usuario."""
-    email: EmailStr = Field(..., example="usuario@ejemplo.com")
-    password: str = Field(..., min_length=8)
-
-class UserInDB(BaseModel):
-    """Esquema de usuario tal como se almacena/lee en la base de datos."""
-    id: str = Field(..., alias="_id", example="60c72b2f9c1e7c001f8d4e5b")
-    email: EmailStr
-    hashed_password: str # Almacenamos el hash, no la contraseña
-    created_at: datetime
-    updated_at: datetime
-
-    class Config:
-        populate_by_name = True
-        json_encoders = {
-            datetime: lambda dt: dt.isoformat(),
+# Schema representing a user in the database
+class UserInDBBase(UserBase):
+    id: Optional[str] = Field(None, alias="_id", description="ID de MongoDB (ObjectId en string).") 
+    
+    # Configuración de Pydantic v2
+    model_config = ConfigDict(
+        populate_by_name=True,
+        from_attributes=True,
+        json_encoders={
+            datetime: lambda v: v.isoformat()
         }
+    )
 
-# --- Esquemas de Autenticación ---
+class UserInDB(UserInDBBase):
+    hashed_password: str = Field(..., description="Contraseña hasheada para almacenamiento seguro.")
+    # Usamos string 'TaskModel' para evitar la importación circular inicial
+    tasks: Optional[List['TaskModel']] = None 
+
+class UserPublic(UserInDBBase):
+    tasks: Optional[List['TaskModel']] = None 
+
+# --- Esquemas de Autenticación (JWT) ---
 
 class Token(BaseModel):
-    """Esquema para la respuesta de login (el token JWT)."""
-    access_token: str
-    token_type: str = "bearer"
+    access_token: str = Field(..., description="El token de acceso JWT.")
+    token_type: str = Field("bearer", description="El tipo de esquema de autenticación (siempre 'bearer').")
 
 class TokenData(BaseModel):
-    """Esquema para los datos decodificados del token (ej. el ID de usuario)."""
-    user_id: Optional[str] = None
+    sub: Optional[str] = None 
+    
+# Importa la TaskModel solo para poder resolver la referencia
+from schemas.task_schema import TaskModel 
+
+# Resuelve la referencia circular (Pydantic v2 style)
+UserInDB.model_rebuild()
+UserPublic.model_rebuild()

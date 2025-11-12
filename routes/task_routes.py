@@ -1,101 +1,144 @@
-from typing import List, Optional
-from fastapi import APIRouter, HTTPException, status, Depends
-from schemas.task_schema import TaskCreate, TaskInDB, TaskUpdate
-from repositories.task_repository import TaskRepository
-from schemas.user_schema import UserInDB
-from dependencies.auth_dependencies import get_current_user
+from fastapi import APIRouter, Depends, HTTPException, status, Query
+from typing import Annotated
 
+from schemas.task_schema import TaskModel, TaskCreate, TaskUpdate, PaginatedTaskResponse
+from repositories.task_repository import TaskRepository
+from services.auth_service import get_current_user_id
+
+# Crea una instancia de APIRouter con el prefijo /tasks y tags para Swagger
 router = APIRouter(
     prefix="/tasks",
-    tags=["Tasks"]
+    tags=["Tareas"],
 )
 
-# Inyección de dependencia del repositorio
-def get_task_repository():
-    return TaskRepository()
+# Dependencia para obtener una instancia del repositorio de tareas
+def get_task_repository(repo: TaskRepository = Depends(TaskRepository)):
+    """Inyecta la dependencia del repositorio de tareas."""
+    return repo
 
-@router.post("/", response_model=TaskInDB, status_code=status.HTTP_201_CREATED)
-async def create_task(
+# Dependencia para obtener el ID del usuario actual
+# Utilizamos la dependencia de auth_service para proteger todas las rutas de tareas
+CurrentUser = Annotated[str, Depends(get_current_user_id)]
+TaskRepo = Annotated[TaskRepository, Depends(get_task_repository)]
+
+# ----------------------------------------------------
+# 1. CREAR TAREA (POST /tasks)
+# ----------------------------------------------------
+@router.post(
+    "/",
+    response_model=TaskModel,
+    status_code=status.HTTP_201_CREATED,
+    summary="Crea una nueva tarea"
+)
+async def create_task_endpoint(
     task_data: TaskCreate,
-    current_user: UserInDB = Depends(get_current_user), # Obtenemos el usuario autenticado
-    task_repo: TaskRepository = Depends(get_task_repository)
+    current_user_id: CurrentUser,
+    task_repo: TaskRepo
 ):
-    """Crea una nueva tarea, asociándola al usuario actual."""
-    
-    # 1. Creamos el objeto de tarea con el owner_id del usuario actual
-    task_data_with_owner = task_data.model_dump()
-    task_data_with_owner["owner_id"] = current_user.id
-    
-    # 2. El repositorio se encarga de insertar y devolver la tarea
-    new_task = await task_repo.create(task_data_with_owner)
-    
-    if not new_task:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Error al crear la tarea en la base de datos."
-        )
+    """
+    Crea una nueva tarea y la asocia al ID del usuario autenticado.
+    """
+    # Llama al repositorio para crear la tarea
+    new_task = await task_repo.create_task(task_data, current_user_id)
     return new_task
 
-@router.get("/", response_model=List[TaskInDB])
-async def list_tasks(
-    current_user: UserInDB = Depends(get_current_user),
-    task_repo: TaskRepository = Depends(get_task_repository)
+# ----------------------------------------------------
+# 2. OBTENER TODAS LAS TAREAS (GET /tasks)
+# ----------------------------------------------------
+@router.get(
+    "/",
+    response_model=PaginatedTaskResponse[TaskModel],
+    summary="Obtiene todas las tareas del usuario actual"
+)
+async def get_all_tasks_endpoint(
+    current_user_id: CurrentUser,
+    task_repo: TaskRepo,
+    page: int = Query(1, ge=1, description="Número de página para la paginación."),
+    size: int = Query(10, ge=1, le=100, description="Número de tareas por página.")
 ):
-    """Lista todas las tareas que pertenecen al usuario autenticado."""
-    
-    # El repositorio usará el owner_id para filtrar las tareas
-    return await task_repo.list_by_owner(current_user.id)
+    """
+    Obtiene todas las tareas del usuario actual, con opciones de paginación.
+    """
+    # Llama al repositorio para obtener las tareas paginadas
+    tasks_response = await task_repo.get_all_tasks(current_user_id, page, size)
+    return tasks_response
 
-@router.get("/{task_id}", response_model=TaskInDB)
-async def get_task(
+# ----------------------------------------------------
+# 3. OBTENER TAREA POR ID (GET /tasks/{task_id})
+# ----------------------------------------------------
+@router.get(
+    "/{task_id}",
+    response_model=TaskModel,
+    summary="Obtiene una tarea específica por ID"
+)
+async def get_task_by_id_endpoint(
     task_id: str,
-    current_user: UserInDB = Depends(get_current_user),
-    task_repo: TaskRepository = Depends(get_task_repository)
+    current_user_id: CurrentUser,
+    task_repo: TaskRepo
 ):
-    """Obtiene una tarea específica, verificando que pertenezca al usuario actual."""
-    
-    task = await task_repo.get_by_id_and_owner(task_id, current_user.id)
+    """
+    Busca y devuelve una tarea por su ID, verificando que pertenezca al usuario autenticado.
+    """
+    task = await task_repo.get_by_id(task_id, current_user_id)
     
     if task is None:
-        # Usamos 404 para no dar pistas sobre si la tarea existe o no (seguridad por opacidad)
+        
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Tarea no encontrada."
+            detail="Tarea no encontrada o no pertenece al usuario."
         )
     return task
 
-@router.patch("/{task_id}", response_model=TaskInDB)
-async def update_task(
-    task_id: str, 
-    task_update: TaskUpdate,
-    current_user: UserInDB = Depends(get_current_user),
-    task_repo: TaskRepository = Depends(get_task_repository)
+# ----------------------------------------------------
+# 4. ACTUALIZAR TAREA (PATCH /tasks/{task_id})
+# ----------------------------------------------------
+@router.patch(
+    "/{task_id}",
+    response_model=TaskModel,
+    summary="Actualiza una tarea existente"
+)
+async def update_task_endpoint(
+    task_id: str,
+    update_data: TaskUpdate,
+    current_user_id: CurrentUser,
+    task_repo: TaskRepo
 ):
-    """Actualiza una tarea, verificando que pertenezca al usuario actual."""
-    
-    # Actualizamos solo si el ID de la tarea y el owner_id coinciden
-    updated_task = await task_repo.update(task_id, current_user.id, task_update.model_dump(exclude_unset=True))
+    """
+    Actualiza los campos de una tarea por su ID, verificando la propiedad.
+    Permite actualizar el título, descripción y estado de completitud.
+    """
+    updated_task = await task_repo.update_task(task_id, current_user_id, update_data)
     
     if updated_task is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Tarea no encontrada o no tienes permiso para actualizarla."
+            detail="Tarea no encontrada o no pertenece al usuario."
         )
     return updated_task
 
-@router.delete("/{task_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_task(
+# ----------------------------------------------------
+# 5. ELIMINAR TAREA (DELETE /tasks/{task_id})
+# ----------------------------------------------------
+@router.delete(
+    "/{task_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Elimina una tarea existente"
+)
+async def delete_task_endpoint(
     task_id: str,
-    current_user: UserInDB = Depends(get_current_user),
-    task_repo: TaskRepository = Depends(get_task_repository)
+    current_user_id: CurrentUser,
+    task_repo: TaskRepo
 ):
-    """Elimina una tarea, verificando que pertenezca al usuario actual."""
+    """
+    Elimina una tarea por su ID, verificando que pertenezca al usuario autenticado.
+    Retorna un estado 204 No Content si la eliminación es exitosa.
+    """
+    success = await task_repo.delete_task(task_id, current_user_id)
     
-    deleted_count = await task_repo.delete(task_id, current_user.id)
-    
-    if deleted_count == 0:
+    if not success:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Tarea no encontrada o no tienes permiso para eliminarla."
+            detail="Tarea no encontrada o no pertenece al usuario."
         )
-    return
+    # Retorna None con status 204, lo que indica éxito sin cuerpo de respuesta.
+    return None
