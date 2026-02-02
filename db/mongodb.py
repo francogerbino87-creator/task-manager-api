@@ -1,57 +1,49 @@
-from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
-from config.settings import settings
+from motor.motor_asyncio import AsyncIOMotorClient
 import logging
 
-# Configuración básica de logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# FIX CRÍTICO: Usamos importación ABSOLUTA desde la raíz del proyecto.
+# La carpeta 'config' está al mismo nivel que 'db'.
+from config.settings import settings 
 
-# Definimos variables globales para la conexión y la base de datos
-# client: Será la instancia del cliente Motor para MongoDB
-# database: Será la instancia de la base de datos específica
+# Variables globales para la conexión
 client: AsyncIOMotorClient = None
-database: AsyncIOMotorDatabase = None
+db_client = None
 
-
-async def connect_to_mongo():
-    """
-    Inicializa la conexión a MongoDB usando el URI de las settings.
-    Se ejecuta durante el evento 'startup' de FastAPI.
-    """
-    global client, database
+async def connect():
+    """Establece la conexión a MongoDB."""
+    global client, db_client
     
+    logging.info(f"Intentando conectar a MongoDB en: {settings.MONGODB_URI}")
     try:
-        # Crea la conexión asíncrona a MongoDB
+        # Inicializa el cliente y la base de datos
         client = AsyncIOMotorClient(
-            settings.MONGO_URI,
-            serverSelectionTimeoutMS=5000  # Tiempo máximo de espera para la conexión
+            settings.MONGODB_URI,
+            serverSelectionTimeoutMS=5000 # Timeout de 5 segundos para fallar rápido
         )
-        # Selecciona la base de datos especificada en settings
-        database = client[settings.MONGO_DB_NAME]
-        
-        # Intenta verificar la conexión
+        # Prueba la conexión
         await client.admin.command('ping')
-        logger.info(f"Conexión exitosa a MongoDB en URI: {settings.MONGO_URI}")
+        
+        # Asigna la base de datos específica
+        db_client = client[settings.MONGODB_DATABASE]
+        
+        logging.info("Conexión a MongoDB exitosa.")
         
     except Exception as e:
-        logger.error(f"Fallo al conectar a MongoDB: {e}")
-        # En una aplicación real, podrías querer terminar la aplicación aquí.
-        # Por ahora, solo registramos el error.
+        logging.error(f"Fallo al conectar a MongoDB. Asegúrate de que el servidor esté corriendo. Error: {e}")
+        # En un entorno real, podrías querer detener la aplicación aquí
 
-
-async def close_mongo_connection():
-    """
-    Cierra la conexión con el cliente de MongoDB.
-    Se ejecuta durante el evento 'shutdown' de FastAPI.
-    """
+async def close():
+    """Cierra la conexión a MongoDB."""
     global client
     if client:
+        logging.info("Cerrando conexión a MongoDB.")
         client.close()
-        logger.info("Conexión a MongoDB cerrada.")
 
-# Función de utilidad para obtener la base de datos (útil para inyección de dependencia)
-def get_database() -> AsyncIOMotorDatabase:
-    """Devuelve la instancia de la base de datos MongoDB."""
-    if database is None:
-        raise Exception("Database client not initialized. Call connect_to_mongo first.")
-    return database
+# Función helper para obtener la instancia del cliente de la base de datos
+# RENOMBRADO A get_db para coincidir con la importación en auth.py
+def get_db():
+    """Retorna la instancia del cliente de la base de datos (db_client)."""
+    if db_client is None:
+        # Esto solo debería ocurrir si la aplicación se usa antes de connect()
+        raise Exception("La conexión a la base de datos no está inicializada.")
+    return db_client

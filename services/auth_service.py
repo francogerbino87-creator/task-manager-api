@@ -1,92 +1,61 @@
-from datetime import datetime, timedelta, timezone
 from typing import Optional
+from fastapi import HTTPException, status 
 
-from passlib.context import CryptContext
-from jose import JWTError, jwt
-from fastapi.security import OAuth2PasswordBearer
-from fastapi import Depends, HTTPException, status
-from config.settings import settings
-from schemas.user_schema import TokenData
+from schemas.user_schema import UserInDB, UserCreate
+from repositories.user_repository import UserRepository
+from app.core.security import create_access_token, get_password_hash, verify_password 
 
-# --- Configuración de Seguridad ---
+# --- Servicio de Autenticación (AuthService) ---
 
-# Esquema para el manejo de contraseñas (usamos bcrypt)
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+class AuthService:
+    def __init__(self, user_repository: UserRepository):
+        self.user_repository = user_repository
 
-# Esquema de seguridad para FastAPI (para obtener el token del header)
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/token")
-
-# --- Funciones de Hashing de Contraseña ---
-
-def verify_password(plain_password: str, hashed_password: str) -> bool:
-    """Verifica si la contraseña plana coincide con el hash almacenado."""
-    return pwd_context.verify(plain_password, hashed_password)
-
-def get_password_hash(password: str) -> str:
-    """Genera el hash de una contraseña plana."""
-    return pwd_context.hash(password)
-
-# --- Funciones de Token JWT ---
-
-def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
-    """Crea un token de acceso JWT con datos y tiempo de expiración."""
-    to_encode = data.copy()
-    if expires_delta:
-        expire = datetime.now(timezone.utc) + expires_delta
-    else:
-        # Si no se especifica expiración, usa la configuración por defecto
-        expire = datetime.now(timezone.utc) + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
-    
-    to_encode.update({"exp": expire})
-    
-    # El 'sub' (subject) es el estándar para identificar al usuario (ej. su ID)
-    encoded_jwt = jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
-    return encoded_jwt
-
-def decode_access_token(token: str) -> Optional[TokenData]:
-    """Decodifica el token de acceso JWT y verifica su validez."""
-    credentials_exception = HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Credenciales de autenticación inválidas",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
-    
-    try:
-        # Decodificar el token usando la clave secreta y el algoritmo
-        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
-        
-        # El sub (subject) debe ser la clave primaria (ID del usuario)
-        user_id: str = payload.get("sub")
-        
-        if user_id is None:
-            raise credentials_exception
+    async def register_user(self, user_in: UserCreate) -> UserInDB:
+        """
+        Registra un nuevo usuario, hasheando la contraseña y verificando duplicidad.
+        """
+        # 1. Verificar si el email ya existe
+        existing_user = await self.user_repository.get_by_email(user_in.email)
+        if existing_user:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="El correo electrónico ya está registrado.")
             
-        # Retorna los datos del token con el ID del usuario
-        token_data = TokenData(sub=user_id)
-        return token_data
+        try:
+            # 2. HASHEAR LA CONTRASEÑA EN EL SERVICIO
+            hashed_password = get_password_hash(user_in.password)
+            
+            # 3. Delegar la creación al repositorio, pasándole el hash.
+            new_user = await self.user_repository.create_user(user_in, hashed_password)
+            return new_user
+            
+        except ValueError as e:
+            # Captura el error de 'Email already registered' que viene del repositorio
+            print(f"DEBUG_ERROR: Valor inválido durante el registro: {e}")
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+            
+        except Exception as e:
+            # CAPTURA CUALQUIER OTRO ERROR (e.g., fallos de DB, PyMongoError)
+            print(f"FATAL_ERROR: Falla de inserción en la base de datos: {e}")
+            # Devolvemos un 500 para indicar que el fallo es del lado del servidor/DB
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
+                detail=f"Error inesperado al crear el usuario. Por favor, revisa la consola del servidor."
+            )
+
+
+    async def authenticate_user(self, email: str, password: str) -> Optional[UserInDB]:
+        """Autentica un usuario por email y contraseña."""
         
-    except JWTError:
-        # Error genérico de JWT (expiración, firma inválida, etc.)
-        raise credentials_exception
+        user = await self.user_repository.get_by_email(email)
+        
+        if user and self.user_repository.verify_password(password, user.hashed_password):
+            return user
+        return None
 
-# --- Dependencia de Autenticación de FastAPI ---
-# Esta función se usará en los endpoints que requieren un usuario logueado.
-
-async def get_current_user_id(token: str = Depends(oauth2_scheme)) -> str:
-    """
-    Dependencia de FastAPI para obtener el ID del usuario autenticado
-    a partir del token JWT.
-    """
-    # Usamos decode_access_token para obtener el ID
-    token_data = decode_access_token(token)
-    
-    # Si token_data.sub es None, decode_access_token ya habría lanzado una excepción,
-    # pero verificamos de nuevo por seguridad
-    if token_data.sub is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Credenciales de autenticación inválidas",
-            headers={"WWW-Authenticate": "Bearer"},
+    def create_user_token(self, user: UserInDB) -> str:
+        """Crea el token JWT para un usuario autenticado."""
+        
+        access_token = create_access_token(
+            data={"sub": str(user.id)}, 
         )
-    
-    return token_data.sub
+        return access_token

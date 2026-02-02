@@ -1,49 +1,46 @@
-from typing import Optional, List
-from pydantic import BaseModel, EmailStr, Field, ConfigDict
-from datetime import datetime
+from typing import Optional
+from pydantic import BaseModel, Field, EmailStr
 
-# Base schema for shared attributes
-class UserBase(BaseModel):
-    email: EmailStr = Field(..., description="Correo electrónico único del usuario.")
+# Esquema base para los datos de entrada
+class UserCreate(BaseModel):
+    email: EmailStr = Field(..., example="john.doe@example.com")
+    password: str = Field(..., min_length=8, max_length=72, example="securepassword123")
+    full_name: Optional[str] = Field(None, example="John Doe")
+
+# Esquema usado para los datos almacenados en la base de datos y para respuestas
+class UserInDB(BaseModel):
+    # CRÍTICO: Usamos 'id' para Python/FastAPI, y 'alias="_id"' para decirle a Pydantic
+    # que cuando vea '_id' en la base de datos, lo llame 'id'.
+    id: Optional[str] = Field(None, alias="_id") 
+    email: EmailStr
     full_name: Optional[str] = None
+    hashed_password: str
+    is_active: bool = True
     
-# Schema for user registration (includes the plain password)
-class UserCreate(UserBase):
-    password: str = Field(..., description="Contraseña del usuario (texto plano).")
-
-# Schema representing a user in the database
-class UserInDBBase(UserBase):
-    id: Optional[str] = Field(None, alias="_id", description="ID de MongoDB (ObjectId en string).") 
+    # CRÍTICO PARA PYDANTIC V2 Y MONGODB
+    # Esta configuración es esencial para que Pydantic acepte datos de MongoDB
+    # donde los campos se llaman por su nombre de base de datos (p.ej., '_id')
+    model_config = {
+        "populate_by_name": True, # Permite que se usen los alias
+        "json_schema_extra": {
+            "example": {
+                "id": "60c72b2f9b1d8e001f8b4567",
+                "email": "test@example.com",
+                "full_name": "Test User",
+                "hashed_password": "$2b$12$...",
+                "is_active": True
+            }
+        },
+    }
     
-    # Configuración de Pydantic v2
-    model_config = ConfigDict(
-        populate_by_name=True,
-        from_attributes=True,
-        json_encoders={
-            datetime: lambda v: v.isoformat()
-        }
-    )
+# Esquema para la respuesta después del registro (no incluye el hash)
+class UserResponse(BaseModel):
+    id: str
+    email: EmailStr
+    full_name: Optional[str] = None
+    is_active: bool
 
-class UserInDB(UserInDBBase):
-    hashed_password: str = Field(..., description="Contraseña hasheada para almacenamiento seguro.")
-    # Usamos string 'TaskModel' para evitar la importación circular inicial
-    tasks: Optional[List['TaskModel']] = None 
-
-class UserPublic(UserInDBBase):
-    tasks: Optional[List['TaskModel']] = None 
-
-# --- Esquemas de Autenticación (JWT) ---
-
+# Esquema para la respuesta de inicio de sesión
 class Token(BaseModel):
-    access_token: str = Field(..., description="El token de acceso JWT.")
-    token_type: str = Field("bearer", description="El tipo de esquema de autenticación (siempre 'bearer').")
-
-class TokenData(BaseModel):
-    sub: Optional[str] = None 
-    
-# Importa la TaskModel solo para poder resolver la referencia
-from schemas.task_schema import TaskModel 
-
-# Resuelve la referencia circular (Pydantic v2 style)
-UserInDB.model_rebuild()
-UserPublic.model_rebuild()
+    access_token: str
+    token_type: str = "bearer"

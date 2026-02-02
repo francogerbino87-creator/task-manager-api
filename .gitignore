@@ -205,3 +205,19 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Entornos Virtuales
+
+.venv
+.venv_312
+.venv_stable
+env/
+venv/
+VENV/
+venv_*
+*.pyc
+
+# Archivos de configuración sensible
+
+.env
+.DS_Store

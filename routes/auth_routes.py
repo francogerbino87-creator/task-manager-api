@@ -1,111 +1,58 @@
 from fastapi import APIRouter, Depends, HTTPException, status
-from fastapi.security import OAuth2PasswordRequestForm
-from datetime import timedelta
-from typing import Annotated
+from fastapi.security import OAuth2PasswordRequestForm # Importación CRÍTICA para el login
 
-from config.settings import settings
-from schemas.user_schema import UserCreate, UserInDB, Token
-from services.auth_service import (
-    verify_password, 
-    create_access_token, 
-    get_current_user_id # Importamos para usarlo como dependencia en futuras rutas
-)
+# CRÍTICO: Importar get_db desde la nueva ubicación 'config/database'
+from config.database import get_db 
+from schemas.user_schema import UserCreate, Token
+from services.auth_service import AuthService
 from repositories.user_repository import UserRepository
+from motor.motor_asyncio import AsyncIOMotorDatabase # Usamos IOMotorDatabase para el tipo
 
-# Crea una instancia de APIRouter con el prefijo /auth y tags para Swagger
-router = APIRouter(
-    prefix="/auth",
-    tags=["Autenticación"],
-)
+# --- Configuración de Router y Servicios ---
 
-# Dependencia para obtener una instancia del repositorio de usuarios
-def get_user_repository(repo: UserRepository = Depends(UserRepository)):
-    """Inyecta la dependencia del repositorio de usuarios."""
-    return repo
+router = APIRouter(prefix="/auth", tags=["auth"])
 
-# --- 1. REGISTRO DE USUARIO ---
-@router.post(
-    "/register", 
-    response_model=UserInDB,
-    status_code=status.HTTP_201_CREATED,
-    summary="Registrar un nuevo usuario"
-)
-async def register_user(
-    user_data: UserCreate, 
-    user_repo: Annotated[UserRepository, Depends(get_user_repository)]
-):
+# La dependencia ahora usa AsyncIOMotorDatabase
+async def get_auth_service(db: AsyncIOMotorDatabase = Depends(get_db)) -> AuthService:
+    """Inyector de dependencia para el AuthService."""
+    # UserRepository espera AsyncIOMotorDatabase (ya corregido internamente en tu repositorio)
+    user_repository = UserRepository(db)
+    return AuthService(user_repository)
+
+# --- 1. Endpoint de Registro ---
+@router.post("/register", status_code=status.HTTP_201_CREATED, response_model=Token)
+async def register_user(user_data: UserCreate, auth_service: AuthService = Depends(get_auth_service)):
     """
-    Registra un nuevo usuario en la base de datos, verificando que el email no exista.
+    Registra un nuevo usuario y devuelve un token de acceso inmediatamente.
     """
-    # 1. Verificar si el usuario ya existe
-    existing_user = await user_repo.get_by_email(user_data.email)
-    if existing_user:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="El email ya está registrado."
-        )
-
-    # 2. Crear el nuevo usuario (la lógica de hasheo está en el repositorio)
-    new_user = await user_repo.create_user(user_data)
+    new_user = await auth_service.register_user(user_data)
     
-    # 3. Retornar el esquema UserInDB sin la contraseña hasheada
-    return new_user
-
-# --- 2. INICIO DE SESIÓN (OBTENER TOKEN) ---
-@router.post(
-    "/token", 
-    response_model=Token,
-    summary="Obtener un token JWT para iniciar sesión"
-)
-async def login_for_access_token(
-    form_data: Annotated[OAuth2PasswordRequestForm, Depends()], 
-    user_repo: Annotated[UserRepository, Depends(get_user_repository)]
-):
-    """
-    Verifica las credenciales de email/contraseña y devuelve un token JWT.
-    """
-    # 1. Buscar usuario por email (username en OAuth2PasswordRequestForm es el email)
-    user = await user_repo.get_by_email(form_data.username)
-    
-    if not user or not verify_password(form_data.password, user.hashed_password):
-        # Credenciales inválidas
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Email o contraseña incorrectos",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-        
-    # 2. Crear el token JWT
-    access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
-    
-    access_token = create_access_token(
-        data={"sub": user.id}, # El 'sub' (subject) es el ID del usuario
-        expires_delta=access_token_expires
-    )
-    
-    # 3. Retornar el token
+    # Después del registro exitoso, genera el token
+    access_token = auth_service.create_user_token(new_user)
     return {"access_token": access_token, "token_type": "bearer"}
 
-# --- 3. RUTA DE PRUEBA (Para verificar el token) ---
-# Esta ruta utiliza la dependencia get_current_user_id
-@router.get(
-    "/me", 
-    response_model=UserInDB,
-    summary="Obtener la información del usuario actual autenticado"
-)
-async def read_users_me(
-    current_user_id: Annotated[str, Depends(get_current_user_id)],
-    user_repo: Annotated[UserRepository, Depends(get_user_repository)]
+# --- 2. Endpoint de Inicio de Sesión (Token) ---
+@router.post("/token", response_model=Token)
+async def login_for_access_token(
+    # Usa el formulario estándar de OAuth2 para recibir username (email) y password
+    form_data: OAuth2PasswordRequestForm = Depends(),
+    auth_service: AuthService = Depends(get_auth_service)
 ):
     """
-    Requiere un token JWT válido. Devuelve los datos del usuario asociado al token.
+    Procesa las credenciales (email y password) y devuelve un token JWT.
     """
-    user = await user_repo.get_by_id(current_user_id)
+    # El 'username' de OAuth2PasswordRequestForm se usa para el email
+    user = await auth_service.authenticate_user(form_data.username, form_data.password)
     
     if not user:
+        # Lanza una excepción 401 que es estándar en el flujo OAuth2
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Usuario no encontrado"
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Credenciales incorrectas o usuario no activo.",
+            headers={"WWW-Authenticate": "Bearer"},
         )
-        
-    return user
+    
+    # Crea el token JWT
+    access_token = auth_service.create_user_token(user)
+    
+    return {"access_token": access_token, "token_type": "bearer"}

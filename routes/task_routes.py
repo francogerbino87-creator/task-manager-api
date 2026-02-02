@@ -1,144 +1,110 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Query
 from typing import Annotated
 
-from schemas.task_schema import TaskModel, TaskCreate, TaskUpdate, PaginatedTaskResponse
-from repositories.task_repository import TaskRepository
-from services.auth_service import get_current_user_id
+from fastapi import APIRouter, Depends, HTTPException, status
+from bson import ObjectId # Todavía necesario para la validación de IDs en la ruta
 
-# Crea una instancia de APIRouter con el prefijo /tasks y tags para Swagger
+# Importación de Repositorio y Dependencias
+from repositories.task_repository import TaskRepository
+from schemas.task_schema import TaskInDB, TaskCreate, TaskUpdate, TaskListResponse
+from schemas.user_schema import UserInDB
+from app.core.dependencies import get_current_user, get_task_repository # Importamos el repositorio
+
+# Crea la instancia del router y añade el prefijo para la documentación
 router = APIRouter(
     prefix="/tasks",
     tags=["Tareas"],
 )
 
-# Dependencia para obtener una instancia del repositorio de tareas
-def get_task_repository(repo: TaskRepository = Depends(TaskRepository)):
-    """Inyecta la dependencia del repositorio de tareas."""
-    return repo
-
-# Dependencia para obtener el ID del usuario actual
-# Utilizamos la dependencia de auth_service para proteger todas las rutas de tareas
-CurrentUser = Annotated[str, Depends(get_current_user_id)]
-TaskRepo = Annotated[TaskRepository, Depends(get_task_repository)]
-
-# ----------------------------------------------------
-# 1. CREAR TAREA (POST /tasks)
-# ----------------------------------------------------
-@router.post(
-    "/",
-    response_model=TaskModel,
-    status_code=status.HTTP_201_CREATED,
-    summary="Crea una nueva tarea"
-)
-async def create_task_endpoint(
-    task_data: TaskCreate,
-    current_user_id: CurrentUser,
-    task_repo: TaskRepo
-):
+# --- Dependencia Helper para obtener la Tarea o lanzar 404 ---
+async def get_task_or_404_by_repo(
+    task_id: str, 
+    # Inyectamos el usuario actual y el repositorio
+    current_user: Annotated[UserInDB, Depends(get_current_user)], 
+    task_repo: Annotated[TaskRepository, Depends(get_task_repository)]
+) -> TaskInDB:
     """
-    Crea una nueva tarea y la asocia al ID del usuario autenticado.
+    Busca una tarea por ID para el usuario actual utilizando el repositorio.
+    Lanza HTTPException 404 si no se encuentra o no pertenece al usuario.
     """
-    # Llama al repositorio para crear la tarea
-    new_task = await task_repo.create_task(task_data, current_user_id)
-    return new_task
-
-# ----------------------------------------------------
-# 2. OBTENER TODAS LAS TAREAS (GET /tasks)
-# ----------------------------------------------------
-@router.get(
-    "/",
-    response_model=PaginatedTaskResponse[TaskModel],
-    summary="Obtiene todas las tareas del usuario actual"
-)
-async def get_all_tasks_endpoint(
-    current_user_id: CurrentUser,
-    task_repo: TaskRepo,
-    page: int = Query(1, ge=1, description="Número de página para la paginación."),
-    size: int = Query(10, ge=1, le=100, description="Número de tareas por página.")
-):
-    """
-    Obtiene todas las tareas del usuario actual, con opciones de paginación.
-    """
-    # Llama al repositorio para obtener las tareas paginadas
-    tasks_response = await task_repo.get_all_tasks(current_user_id, page, size)
-    return tasks_response
-
-# ----------------------------------------------------
-# 3. OBTENER TAREA POR ID (GET /tasks/{task_id})
-# ----------------------------------------------------
-@router.get(
-    "/{task_id}",
-    response_model=TaskModel,
-    summary="Obtiene una tarea específica por ID"
-)
-async def get_task_by_id_endpoint(
-    task_id: str,
-    current_user_id: CurrentUser,
-    task_repo: TaskRepo
-):
-    """
-    Busca y devuelve una tarea por su ID, verificando que pertenezca al usuario autenticado.
-    """
-    task = await task_repo.get_by_id(task_id, current_user_id)
+    if not ObjectId.is_valid(task_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="ID de tarea inválido")
     
-    if task is None:
+    # El repositorio maneja la lógica de buscar por ID + Owner_ID
+    task = await task_repo.get_by_id(task_id, current_user.id)
+    
+    if not task:
+        # Mensaje genérico por seguridad
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tarea no encontrada")
         
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Tarea no encontrada o no pertenece al usuario."
-        )
     return task
 
-# ----------------------------------------------------
-# 4. ACTUALIZAR TAREA (PATCH /tasks/{task_id})
-# ----------------------------------------------------
-@router.patch(
-    "/{task_id}",
-    response_model=TaskModel,
-    summary="Actualiza una tarea existente"
-)
-async def update_task_endpoint(
-    task_id: str,
-    update_data: TaskUpdate,
-    current_user_id: CurrentUser,
-    task_repo: TaskRepo
+
+# --- Rutas CRUD (Usando el Repositorio) ---
+
+@router.post("/", response_model=TaskInDB, status_code=status.HTTP_201_CREATED, summary="Crear Tarea")
+async def create_task(
+    task_in: TaskCreate,
+    current_user: Annotated[UserInDB, Depends(get_current_user)],
+    task_repo: Annotated[TaskRepository, Depends(get_task_repository)],
 ):
-    """
-    Actualiza los campos de una tarea por su ID, verificando la propiedad.
-    Permite actualizar el título, descripción y estado de completitud.
-    """
-    updated_task = await task_repo.update_task(task_id, current_user_id, update_data)
+    """Crea una nueva tarea para el usuario autenticado."""
+    # Delega la creación y asignación de owner_id al repositorio
+    new_task = await task_repo.create_task(task_in, current_user.id)
+    return new_task
+
+@router.get("/", response_model=TaskListResponse, summary="Listar Tareas")
+async def read_tasks(
+    current_user: Annotated[UserInDB, Depends(get_current_user)],
+    task_repo: Annotated[TaskRepository, Depends(get_task_repository)],
+):
+    """Lista todas las tareas del usuario autenticado."""
+    # Por ahora, usamos una lista simple sin paginación (si TaskRepository tiene paginación, 
+    # podrías ajustar esto para incluir page y size como query params)
+    tasks = await task_repo.get_all_tasks(current_user.id)
+    return {"tasks": tasks, "total": len(tasks)}
+
+@router.get("/{task_id}", response_model=TaskInDB, summary="Obtener Tarea por ID")
+async def read_task(
+    # La dependencia helper ya busca y valida la tarea
+    task: Annotated[TaskInDB, Depends(get_task_or_404_by_repo)], 
+):
+    """Obtiene una tarea específica por su ID, verificando propiedad."""
+    return task 
+
+@router.put("/{task_id}", response_model=TaskInDB, summary="Actualizar Tarea")
+async def update_task(
+    task_update: TaskUpdate,
+    # Obtenemos la tarea existente y verificada por la dependencia helper
+    task: Annotated[TaskInDB, Depends(get_task_or_404_by_repo)], 
+    current_user: Annotated[UserInDB, Depends(get_current_user)],
+    task_repo: Annotated[TaskRepository, Depends(get_task_repository)],
+):
+    """Actualiza una tarea existente."""
     
-    if updated_task is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Tarea no encontrada o no pertenece al usuario."
-        )
+    # El repositorio maneja la actualización y el timestamp
+    updated_task = await task_repo.update_task(task.id, current_user.id, task_update)
+
+    if not updated_task:
+        # En caso de que el repositorio falle en encontrarla después de la verificación
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Fallo en la base de datos al actualizar")
+
     return updated_task
 
-# ----------------------------------------------------
-# 5. ELIMINAR TAREA (DELETE /tasks/{task_id})
-# ----------------------------------------------------
-@router.delete(
-    "/{task_id}",
-    status_code=status.HTTP_204_NO_CONTENT,
-    summary="Elimina una tarea existente"
-)
-async def delete_task_endpoint(
-    task_id: str,
-    current_user_id: CurrentUser,
-    task_repo: TaskRepo
+
+@router.delete("/{task_id}", status_code=status.HTTP_204_NO_CONTENT, summary="Eliminar Tarea")
+async def delete_task(
+    # Obtenemos la tarea para asegurar que existe antes de intentar borrar
+    task: Annotated[TaskInDB, Depends(get_task_or_404_by_repo)], 
+    current_user: Annotated[UserInDB, Depends(get_current_user)],
+    task_repo: Annotated[TaskRepository, Depends(get_task_repository)],
 ):
-    """
-    Elimina una tarea por su ID, verificando que pertenezca al usuario autenticado.
-    Retorna un estado 204 No Content si la eliminación es exitosa.
-    """
-    success = await task_repo.delete_task(task_id, current_user_id)
+    """Elimina una tarea existente por su ID."""
     
-    if not success:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Tarea no encontrada o no pertenece al usuario."
-        )
-    # Retorna None con status 204, lo que indica éxito sin cuerpo de respuesta.
-    return None
+    # El repositorio maneja la eliminación con la verificación de owner_id
+    deleted = await task_repo.delete_task(task.id, current_user.id)
+    
+    if not deleted:
+        # Si no se pudo borrar, algo falló a nivel DB/repositorio
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Fallo al eliminar la tarea")
+        
+    return
